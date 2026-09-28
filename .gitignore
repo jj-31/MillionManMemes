@@ -1,0 +1,46 @@
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Build output
+.gradle/
+build/
+*/build/
+
+# Android generated files
+local.properties
+
+# APKs / bundles
+*.apk
+*.aab
+
+# Native build
+.externalNativeBuild/
+.cxx/
+
+# Kotlin
+.kotlin/
+
+# Generated
+captures/
+.externalNativeBuild/
+
+# Google/Firebase / signing credentials
+google-services.json
+*.jks
+*.keystore
+
+# Secrets / environment
+.env
+.env.*
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
