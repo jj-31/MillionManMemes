@@ -51,6 +51,8 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import android.os.Handler
+import android.os.Looper
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -66,7 +68,6 @@ class MainActivity : ComponentActivity() {
     // The file waiting to be sent. If null when a connection forms, this phone acts as the receiver.
     @Volatile private var pendingUri: Uri? = null
 
-    // Compose watches these and redraws when they change
     private var peers by mutableStateOf<List<WifiP2pDevice>>(emptyList())
     private var status by mutableStateOf("Starting...")
     private var pickedName by mutableStateOf<String?>(null)
@@ -78,11 +79,8 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) {
-            startDiscovery()
-        } else {
-            status = "Permission denied. Allow it in Settings > Apps > this app."
-        }
+        if (results.values.all { it }) startDiscovery()
+        else status = "Permission denied. Allow it in Settings > Apps > this app."
     }
 
     private fun requiredPermission(): String =
@@ -103,7 +101,7 @@ class MainActivity : ComponentActivity() {
     // ---------- File picking ----------
 
     private val filePicker = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
+        ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null) {
             pendingUri = uri
@@ -121,8 +119,8 @@ class MainActivity : ComponentActivity() {
 
     private val peerListListener = WifiP2pManager.PeerListListener { list ->
         peers = list.deviceList.toList()
-        Log.d("WiFiDirect", "Peer count: ${peers.size}")
-        peers.forEach { Log.d("WiFiDirect", "Found: ${it.deviceName} ${it.deviceAddress}") }
+        Log.d(TAG, "Peer count: ${peers.size}")
+        peers.forEach { Log.d(TAG, "Found: ${it.deviceName} ${it.deviceAddress}") }
 
         if (!transferRunning.get()) {
             status = if (peers.isEmpty()) "Scanning... no devices yet" else "Found ${peers.size} device(s)"
@@ -139,14 +137,11 @@ class MainActivity : ComponentActivity() {
                         status = "Wi-Fi Direct is off. Turn Wi-Fi on."
                     }
                 }
-                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION ->
-                    manager.requestPeers(channel, peerListListener)
-                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION ->
-                    handleConnectionChanged()
+                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> manager.requestPeers(channel, peerListListener)
+                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> handleConnectionChanged()
             }
         }
     }
-
 
     @SuppressLint("MissingPermission")
     private fun startDiscovery() {
@@ -167,13 +162,13 @@ class MainActivity : ComponentActivity() {
 
         manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                Log.d("WiFiDirect", "Discovery started")
+                Log.d(TAG, "Discovery started")
                 if (!transferRunning.get()) status = "Scanning..."
                 manager.requestPeers(channel, peerListListener)
             }
 
             override fun onFailure(reason: Int) {
-                Log.e("WiFiDirect", "Discovery failed: $reason")
+                Log.e(TAG, "Discovery failed: $reason")
                 status = when (reason) {
                     WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct not supported on this device"
                     WifiP2pManager.BUSY -> "Busy, try again in a moment"
@@ -183,13 +178,42 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    // ---------- Connection formed (runs on BOTH phones) ----------
+    // ---------- Connecting (sender side) ----------
 
     @SuppressLint("MissingPermission")
+    private fun connectTo(device: WifiP2pDevice, attempt: Int = 1) {
+        if (pendingUri == null) {
+            status = "Pick a file first"
+            return
+        }
+        status = "Connecting to ${device.deviceName}..."
+
+        manager.cancelConnect(channel, null)
+        manager.removeGroup(channel, null)
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            val config = WifiP2pConfig().apply {
+                deviceAddress = device.deviceAddress
+                wps.setup = WpsInfo.PBC
+            }
+            manager.connect(channel, config, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { Log.d(TAG, "Connect request sent") }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "Connect failed: $reason (attempt $attempt)")
+                    if (reason == WifiP2pManager.BUSY && attempt < 3) {
+                        connectTo(device, attempt + 1)
+                    } else {
+                        status = "Connect failed: $reason"
+                    }
+                }
+            })
+        }, 800)
+    }
+
+    // ---------- Connection formed (runs on BOTH phones) ----------
     private fun handleConnectionChanged() {
         manager.requestConnectionInfo(channel) { info ->
             if (info == null || !info.groupFormed) return@requestConnectionInfo
-            // The broadcast can fire several times; only start one transfer
             if (!transferRunning.compareAndSet(false, true)) return@requestConnectionInfo
             thread { runTransfer(info) }
         }
@@ -270,7 +294,6 @@ class MainActivity : ComponentActivity() {
         FileOutputStream(dest).use { input.copyTo(it) }
         socket.getOutputStream().apply { write(1); flush() }   // confirmation
         Log.d(TAG, "Received ${dest.absolutePath}")
-        // No UI change on purpose: the receiving phone shows nothing
     }
 
     @SuppressLint("MissingPermission")
@@ -279,25 +302,6 @@ class MainActivity : ComponentActivity() {
         manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() { manager.discoverPeers(channel, null) }
             override fun onFailure(reason: Int) { manager.discoverPeers(channel, null) }
-        })
-    }
-
-    // ---------- Connecting (sender side) ----------
-
-    @SuppressLint("MissingPermission")
-    private fun connectTo(device: WifiP2pDevice) {
-        if (pendingUri == null) {
-            status = "Pick a file first"
-            return
-        }
-        val config = WifiP2pConfig().apply {
-            deviceAddress = device.deviceAddress
-            wps.setup = WpsInfo.PBC
-        }
-        status = "Connecting to ${device.deviceName}..."
-        manager.connect(channel, config, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() { Log.d(TAG, "Connect request sent") }
-            override fun onFailure(reason: Int) { status = "Connect failed: $reason" }
         })
     }
 
@@ -315,11 +319,20 @@ class MainActivity : ComponentActivity() {
                             .padding(16.dp)
                             .fillMaxSize()
                     ) {
+                        Text("Build v3")
                         Text(status)
+
+                        Button(
+                            onClick = { filePicker.launch("*/*") },
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        ) { Text(pickedName?.let { "File: $it" } ?: "Pick a file to send") }
+
                         Button(
                             onClick = { ensurePermissionThenScan() },
                             modifier = Modifier.padding(vertical = 8.dp)
                         ) { Text("Scan again") }
+
+                        Text("Tap a device to send the picked file:")
 
                         LazyColumn {
                             items(peers, key = { it.deviceAddress }) { device ->
